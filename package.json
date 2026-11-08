@@ -1,6 +1,6 @@
 {
   "name": "dsh-dual-screen",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "副屏管家「小肥鱼」：把工具打开的浏览器/终端窗口投送到副屏；副屏常驻面板承载事件时间线与问答（谁先答算谁）；透明桌宠；并能在副屏直接启动进程（run_on_secondary 工具）。",
   "type": "module",
   "main": "lib/index.js",

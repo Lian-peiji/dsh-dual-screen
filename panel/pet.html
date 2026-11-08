@@ -294,6 +294,9 @@ function postDrag(phase, x, y, moved) {
 
 document.addEventListener('mousedown', (e) => {
   if (e.button !== 0) return;
+  /* 点在菜单上不是"抓起桌宠"：这里若照常 start 一次拖动，随后的 click 会被
+     dragMoved 判定吃掉，菜单项又变成"点了没反应"。 */
+  if (menu.contains(e.target)) return;
   dragActive = true;
   dragMoved = false;
   dragOrigin = { x: e.screenX, y: e.screenY };
@@ -407,8 +410,15 @@ document.addEventListener('auxclick', (e) => {
    主人会只留桌宠、把小窗关掉，所以桌宠菜单要能把小窗叫回来。
    面板状态归服务端管，页面只问一句再决定"开"还是"已经开着"——toggle 接口是
    幂等不了的（开着再点就关），所以先读 panel.json 再动手，避免误关。 */
+/* 打开小窗的进行中标记。
+ * /toggle 不是幂等的（开着再点就关），所以两次并发调用会互相抵消 ——
+ * 表现就是"点了没反应"。2026-11-08 的菜单 bug 正是这样：菜单项和 body 的
+ * 点击监听同时各发了一次。两道闸已经堵住那条路，这里再加一把锁防止连点。 */
+let openingPanel = false;
 async function openPanel() {
   if (!API_BASE) { bubble('没有小窗地址…'); return; }
+  if (openingPanel) { bubble('正在叫小窗…'); return; }
+  openingPanel = true;
   try {
     const r = await fetch(API_BASE + '/dsh-dual-screen/panel.json', { cache: 'no-store' });
     const j = r.ok ? await r.json() : {};
@@ -425,10 +435,24 @@ async function openPanel() {
     else bubble('小窗没打开…');
   } catch (e) {
     bubble('小窗没打开…');
+  } finally {
+    openingPanel = false;
   }
 }
 
+/* 菜单点击要**吃掉**，不能让它冒泡到 body。
+ *
+ * 2026-11-08 主人报「右键菜单几个选项点击无效或错乱」，根因就在这里：
+ * body 上有个「点桌宠 = 叫回小窗」的监听（见文件末尾），而 #petmenu 是 body 的子节点。
+ * 点任一菜单项都会额外触发一次 openPanel()：
+ *   · 「回到右下角」/「让小肥鱼回去」→ 顺带把小窗叫了出来（错乱）；
+ *   · 「打开小窗」→ 自身 openPanel() + 冒泡的 openPanel() 并发跑，
+ *     两次 /toggle 一开一关，净效果是"点了没反应"（无效）。
+ * 在菜单自己的处理器里 stopPropagation 只是堵了一条路，最稳的是两道闸一起上：
+ * 这里停冒泡，body 那边再显式忽略菜单内的点击。 */
 menu.addEventListener('click', (e) => {
+  // 不论命中哪个元素，只要点在菜单里就不许往下传。
+  e.stopPropagation();
   const act = e.target && e.target.getAttribute && e.target.getAttribute('data-act');
   if (!act) return;
   hideMenu();
@@ -441,6 +465,10 @@ menu.addEventListener('click', (e) => {
   }
 });
 
+/* 右键也要吃掉：否则右键菜单里再右键会把菜单关掉/重新定位。 */
+menu.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+menu.addEventListener('mousedown', (e) => { e.stopPropagation(); });
+
 document.addEventListener('click', (e) => {
   if (!menu.contains(e.target)) hideMenu();
 });
@@ -449,7 +477,10 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu()
 /* ---- click: 点一下 = 把小窗叫回来 ----
    折叠圆气泡已经砍掉（2026-11-06 主人：又卡又难看），收起态就是这只桌宠。
    所以点击的主语义是"展开小窗"，顺手播个反应动画；拖动结尾的 click 不算（dragMoved）。 */
-document.body.addEventListener('click', () => {
+document.body.addEventListener('click', (e) => {
+  /* 菜单里的点击不是"点桌宠"。菜单自己有 stopPropagation，这里是第二道闸：
+     任何来自菜单的点击一律不算叫醒小窗（2026-11-08 菜单错乱的根因）。 */
+  if (menu.contains(e.target)) return;
   if (dragMoved) { dragMoved = false; return; }
   react('click');
   openPanel();

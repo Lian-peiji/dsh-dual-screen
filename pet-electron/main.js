@@ -145,6 +145,42 @@ function runSelfTest() {
           log('selftest: screenshot ' + out)
         } catch (e) { log('selftest: screenshot failed: ' + (e && e.message)) }
 
+        if (SELFTEST === 'reset2') {
+          // Prove the item really MOVES the window: shove it somewhere far away first,
+          // then click the real button and require the rect to change.
+          const before = win.getBounds()
+          log('selftest: rect before reset ' + before.x + ',' + before.y)
+          win.setBounds({ x: 2600, y: 0, width: SIZE, height: SIZE })
+          await new Promise((r) => setTimeout(r, 400))
+          const moved = win.getBounds()
+          log('selftest: rect forced to ' + moved.x + ',' + moved.y)
+          const n = await js('(function(){var b=document.querySelector(\'#petmenu button[data-act="reset"]\');if(!b)return -1;b.click();return 1})()')
+          log('selftest: clicked reset item -> ' + n)
+          await new Promise((r) => setTimeout(r, 900))
+          const after = win.getBounds()
+          const home = homeCorner()
+          const okMove = after.x !== moved.x || after.y !== moved.y
+          const okHome = Math.abs(after.x - home.x) <= 2 && Math.abs(after.y - home.y) <= 2
+          log('selftest: rect after reset ' + after.x + ',' + after.y +
+            ' home ' + home.x + ',' + home.y +
+            ' reset-moved=' + (okMove ? 'PASS' : 'FAIL') +
+            ' reset-home=' + (okHome ? 'PASS' : 'FAIL'))
+        }
+
+        if (SELFTEST === 'panel2') {
+          // Click the ACTUAL menu button (not the function behind it). This is the path
+          // the owner uses, and the one that was double-firing /toggle on 2026-11-08.
+          const n = await js('(function(){var b=document.querySelector(\'#petmenu button[data-act="panel"]\');if(!b)return -1;b.click();return 1})()')
+          log('selftest: clicked panel item -> ' + n)
+          let said = ''
+          for (let i = 0; i < 20; i++) {
+            said = await js('document.getElementById("bubble").textContent')
+            if (said) break
+            await new Promise((r) => setTimeout(r, 300))
+          }
+          log('selftest: panel item bubble=' + JSON.stringify(said))
+        }
+
         if (SELFTEST === 'panel') {
           // "Open the panel" menu item: must reach the plugin API and say so in a bubble.
           log('selftest: items=' + await js('document.getElementById("petmenu").innerText.replace(/\\n/g,"|")'))

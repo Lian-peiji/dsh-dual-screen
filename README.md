@@ -14,7 +14,7 @@
 | **副屏面板** | 副屏常驻一块面板（进程内 WPF），显示事件时间线、问答卡片、状态 chip；可拖边改尺寸。**收起态 = 桌宠**（2026-11-06 起不再有折叠圆气泡） |
 | **一键收成桌宠** | 点面板右上 `▾`，面板收起、桌宠**就在鼠标底下**出现（<10 ms，不是每次重新拉 Electron：面板开着时桌宠已在后台热备，见下） |
 | **副屏问答** | DSH 提问时主窗口照常弹 + 副屏镜像一份，**谁先答算谁**（`ask.mode='race'`），也可以配成只在副屏问 |
-| **透明桌宠** | 副屏上一只透明、可点、可拖的鲸鱼娘（Electron 宿主，主题可插拔：`panel/pets/<id>/`） |
+| **透明桌宠** | 副屏上一只透明、可点、可拖的鲸鱼娘（Electron 宿主，主题可插拔：`panel/pets/<id>/`）。右键菜单：打开小窗 / 回到右下角 / 让小肥鱼回去 |
 | **`run_on_secondary` 工具** | 让模型在副屏启动一个进程：窗口从第一帧就生在副屏，不闪主屏、不抢键盘焦点 |
 | **设置页** | 设置 → 副屏管家：界面 / 窗口投送 / 桌宠 / 问答四组开关，改完点保存即写盘 |
 
@@ -119,6 +119,26 @@ stdin 句柄，`stdio:'pipe'` 会静默降级（实测第一秒就 `stdin.destro
 
 ---
 
+## 右键菜单（2026-11-08 修过一次）
+
+三项：**打开小窗** / **回到右下角** / **让小肥鱼回去**。
+
+修的那个 bug：`#petmenu` 是 `<body>` 的子节点，而 `<body>` 上有「点桌宠 = 叫回小窗」的
+处理器。于是点任何菜单项都会**额外**冒泡触发一次 `openPanel()`：
+
+- 「回到右下角」「让小肥鱼回去」→ 顺带把小窗叫了出来（看起来像"错乱"）；
+- 「打开小窗」→ 自己的 + 冒泡的两路并发跑，`/toggle` 不幂等，一开一关互相抵消
+  → 净效果"点了没反应"（看起来像"无效"）。
+
+现在三道闸：菜单点击 `stopPropagation`、`body` 处理器显式 `menu.contains(target)` 早退、
+`openPanel()` 加 re-entrancy 锁（连点也只发一次 `/toggle`）。另外 `mousedown` 也跳过菜单区，
+否则菜单项会被拖动逻辑的 `dragMoved` 吃掉，同样表现为"点了没用"。
+
+`probe/test-menu-items.cjs` 驱动**真实按钮点击**并验证可观测副作用（不是"处理器跑了"）：
+reset 必须真的把窗口挪回默认角落、panel 必须只发**一次** `/toggle`、close 必须写退出标记。
+
+---
+
 ## 排障
 | 现象 | 检查 |
 |---|---|
@@ -126,6 +146,7 @@ stdin 句柄，`stdio:'pipe'` 会静默降级（实测第一秒就 `stdin.destro
 | 窗口没被搬 | `health.json` 的 `monitors` 是否 2；`moveWindows.enabled`；窗口是不是手动拖回主屏过（`respectManualDrag`） |
 | 工具没出现 | `health.json` → `tool.registered` / `tool.error` |
 | 桌宠不动 | 跑 `probe/pet-motion-check.ps1`（两帧像素比对，截图好看不代表在播） |
+| 右键菜单点了没反应 / 乱开小窗 | 已修（0.4.1）。`probe/test-menu-items.cjs` 会驱动真实点击并验证三项副作用 |
 | 收起很慢 | `health.json`/`pet.json` 看桌上是否已有热备（`warm:true`）；`panel/form` 返回的 `warm` 应为 `true`，`ms` 应在个位数 |
 | 改完没生效 | 三处目录是不是同步了；热重载开关是否真的切过（`enabled=false` 再 `true`） |
 
@@ -142,6 +163,7 @@ node probe/test-p3-mood.mjs      # 状态映射
 node probe/test-p4-race.mjs      # 问答竞速
 node probe/test-warm-spot.mjs    # 收起桌宠的落点几何（光标居中 + 贴边夹紧）
 node probe/warm-pipe-test.cjs    # 真机：命名管道预热 / show / quit
+node probe/test-menu-items.cjs   # 右键菜单三项（真实点击 + 副作用断言，用假 API 不碰真面板）
 powershell -File probe/check-ps1.ps1 -Path bin/run-on-secondary.ps1   # .ps1 必须纯 ASCII
 ```
 
