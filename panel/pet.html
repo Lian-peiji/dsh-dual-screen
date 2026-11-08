@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>小肥鱼</title>
+<style>
+  /* The window itself is transparent (WPF AllowsTransparency + WebView2
+     DefaultBackgroundColor=Transparent); this page must never paint a background
+     or the pet gets a rectangle around it. */
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: transparent;
+    overflow: hidden;
+    -webkit-user-select: none; user-select: none;
+    cursor: grab;
+    /* Dragging is done in JS in both hosts, NOT with -webkit-app-region: that needs the
+       OS to treat the click as a window-activation drag, and this always-on-top
+       skipTaskbar window carries WS_EX_NOACTIVATE, so app-region drags do nothing
+       (measured 2026-11-06: the window did not move at all).
+         Electron  -> window.petHost.drag() via preload (IPC to the main process)
+         WebView2  -> window.chrome.webview.postMessage() to the C# shim */
+  }
+  body.dragging { cursor: grabbing; }
+
+  #stage {
+    position: absolute; inset: 0;
+    display: flex; align-items: flex-end; justify-content: center;
+    transform-origin: bottom center;
+  }
+
+  video.layer {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    background: transparent;
+    opacity: 0;
+    transition: opacity var(--fade, 220ms) linear;
+  }
+  video.layer.on { opacity: 1; }
+
+  /* Fallback poster: if a theme ships a static PNG instead of webm, we still show
+     something instead of an empty window. */
+  #poster {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+    display: none;
+  }
+
+  /* Idle bob: a slow vertical drift so a looping clip never looks frozen. */
+  #stage.bob { animation: bob var(--bob, 4.2s) ease-in-out infinite; }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0); }
+    50%      { transform: translateY(-5px); }
+  }
+
+  #bubble {
+    position: absolute; top: 2px; left: 50%; transform: translateX(-50%) scale(0.9);
+    max-width: 96%;
+    padding: 7px 12px;
+    border-radius: 14px;
+    background: rgba(16, 40, 64, 0.94);
+    color: #e8f1f8;
+    font: 13px/1.4 "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    white-space: nowrap;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    opacity: 0; pointer-events: none;
+    transition: opacity 180ms ease, transform 180ms ease;
+  }
+  #bubble.show { opacity: 1; transform: translateX(-50%) scale(1); }
+  #bubble::after {
+    content: ''; position: absolute; bottom: -6px; left: 50%; margin-left: -6px;
+    border: 6px solid transparent; border-top-color: rgba(16, 40, 64, 0.94);
+    border-bottom: 0;
+  }
+
+  #fail {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    color: #ff9d9d; font: 12px/1.4 monospace; text-align: center; padding: 12px;
+  }
+
+  /* Right-click menu. Dark pill matching the bubble, no nesting, big enough to hit. */
+  #petmenu {
+    position: absolute; z-index: 10;
+    background: rgba(16, 40, 64, 0.97);
+    border: 1px solid rgba(79, 179, 255, 0.35);
+    border-radius: 10px;
+    padding: 4px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  #petmenu button {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    color: #e8f1f8;
+    font: 12px/1.2 "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    text-align: left;
+    padding: 7px 12px;
+    border-radius: 7px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #petmenu button:hover { background: rgba(79, 179, 255, 0.22); }
+</style>
+</head>
+<body>
+  <div id="stage" class="bob">
+    <video id="a" class="layer on" muted playsinline autoplay preload="auto"></video>
+    <video id="b" class="layer" muted playsinline preload="auto"></video>
+    <img id="poster" alt="">
+  </div>
+  <div id="bubble"></div>
+  <div id="fail"></div>
+
+<script>
+/*
+ * Theme-driven pet player.
+ *
+ * A THEME is just a folder: panel/pets/<id>/ with a theme.json and some clips.
+ * Nothing about a particular character is hard-coded here, so dropping in a new
+ * Q-version character later is a copy-paste job -- no code change.
+ *
+ * Contract (see pets/whale/theme.json for a commented example):
+ *   { id, name, clips: { state: [clipName...] }, random: [clipName...],
+ *     sprite: { anchor, scale }, timing: { randomMinMs, randomMaxMs, fadeMs } }
+ *   clips resolve to <themeDir>/<clipName>.webm
+ *
+ * Degradation rules, in order: requested state pool -> idle pool -> poster.png ->
+ * a short message. The pet must never become an invisible window.
+ */
+
+const params = new URLSearchParams(location.search);
+const THEME_ID = params.get('theme') || 'whale';
+const API_BASE = params.get('api') || '';       // e.g. http://127.0.0.1:7473
+
+const layers = [document.getElementById('a'), document.getElementById('b')];
+const stage = document.getElementById('stage');
+const poster = document.getElementById('poster');
+const failBox = document.getElementById('fail');
+
+let theme = null;
+let front = 0;
+let currentState = '';
+let currentClip = '';
+let idleSince = Date.now();
+let randomTimer = null;
+let bubbleTimer = null;
+let moodTimer = null;
+
+/* Assets come from ONE exact endpoint with a query parameter.
+   A prefix route would be tidier but did not match in this host (404 on every
+   subpath, measured 2026-11-06), so the path travels in ?f= instead. */
+function assetUrl(rel) {
+  return API_BASE + '/dsh-dual-screen/pet-asset?f=' + encodeURIComponent(rel);
+}
+function clipUrl(clipDir, name) {
+  return assetUrl(clipDir + '/' + name + '.webm');
+}
+
+function showFail(msg) {
+  failBox.style.display = 'flex';
+  failBox.textContent = msg;
+}
+
+function pick(pool) {
+  const arr = (pool || []).filter(Boolean);
+  if (!arr.length) return null;
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/* ---- resolve a state to a clip, walking the fallback chain ---- */
+function resolveClip(state) {
+  const clips = theme.clips || {};
+  const order = [state, 'idle'];
+  for (const key of order) {
+    const name = pick(clips[key]);
+    if (name) return name;
+  }
+  return null;
+}
+
+/* ---- play one clip on the back layer, then swap ---- */
+function play(name, opts = {}) {
+  if (!name) { usePoster(); return; }
+  const back = layers[1 - front];
+  const cur = layers[front];
+  const wantLoop = opts.loop !== false;
+
+  back.src = clipUrl(theme.clipDir, name);
+  back.loop = wantLoop;
+  back.currentTime = 0;
+
+  const started = back.play();
+  if (started && started.catch) {
+    started.catch(() => {
+      // Autoplay can be refused before the first user gesture; retry muted.
+      back.muted = true;
+      back.play().catch(() => showFail('无法播放：' + name));
+    });
+  }
+
+  back.classList.add('on');
+  cur.classList.remove('on');
+  front = 1 - front;
+  currentClip = name;
+  poster.style.display = 'none';
+
+  if (!wantLoop) {
+    back.onended = () => {
+      back.onended = null;
+      play(resolveClip(currentState) || resolveClip('idle'), { loop: true });
+    };
+  }
+}
+
+function usePoster() {
+  layers[0].classList.remove('on');
+  layers[1].classList.remove('on');
+  if (theme.posterUrl) {
+    poster.src = theme.posterUrl;
+    poster.style.display = 'block';
+  } else {
+    showFail('这个主题没有可用素材');
+  }
+}
+
+function setState(state, opts = {}) {
+  const name = opts.clip || resolveClip(state);
+  if (!name) { usePoster(); return; }
+  if (state === currentState && currentClip === name && opts.force !== true) return;
+  currentState = state;
+  idleSince = Date.now();
+  play(name, { loop: true });
+}
+
+function react(kind) {
+  const clips = theme.clips || {};
+  const name = pick(clips[kind]) || pick(clips.click) || pick(clips.happy);
+  if (name) play(name, { loop: false });
+}
+
+function bubble(text, ms = 2600) {
+  const el = document.getElementById('bubble');
+  el.textContent = text;
+  el.classList.add('show');
+  if (bubbleTimer) clearTimeout(bubbleTimer);
+  bubbleTimer = setTimeout(() => el.classList.remove('show'), ms);
+}
+
+/* ---- drag: the PAGE owns the gesture, the host moves the window ----
+   WebView2 covers the entire client area, so WPF never receives a mouse button.
+   We therefore capture the gesture here and report SCREEN coordinates to the host
+   over the web-message channel; the C# shim turns deltas into SetWindowPos calls.
+
+   Coordinate note: event.screenX/Y are CSS pixels while the window's Left/Top are
+   physical DIP-independent pixels. On a 150% monitor those differ by 1.5x, which is
+   why an absolute-delta approach landed the pet in the wrong place (measured: a
+   -180,-120 drag moved the window +602,-167). Reporting the raw screenX/Y and letting
+   the host accumulate DELTAS still carries that scale error, so the page reports
+   movement in its own pixel space and the host applies it as a relative offset from
+   where the drag started -- the accumulated error is bounded by one frame. */
+let dragActive = false;
+let dragMoved = false;
+let dragLast = { x: 0, y: 0 };
+
+function postDrag(phase, x, y, moved) {
+  try {
+    /* Electron host: window.petHost.drag is exposed by preload.js. It takes deltas
+       from the drag ORIGIN, which is what the main process applies to the window.
+       Deltas (not absolute coords) keep CSS pixels and physical window position
+       consistent regardless of the monitor's DPI scale. */
+    if (window.petHost && typeof window.petHost.drag === 'function') {
+      const dx = x - dragOrigin.x;
+      const dy = y - dragOrigin.y;
+      window.__lastDragPost = { engine: 'electron', phase: phase, dx: dx, dy: dy, at: Date.now() };
+      window.petHost.drag(phase, Math.round(dx), Math.round(dy));
+      return;
+    }
+
+    /* WebView2 host: postMessage to the C# shim, which uses SetWindowPos. */
+    const wv = window.chrome && window.chrome.webview;
+    const msg = 'drag:' + phase + ':' + Math.round(x) + ':' + Math.round(y) + (moved ? ':moved' : '');
+    window.__lastDragPost = { engine: 'webview2', msg: msg, hadBridge: !!(wv && wv.postMessage), at: Date.now() };
+    if (!wv || !wv.postMessage) return;    // opened in a plain browser: no host
+    wv.postMessage(msg);
+  } catch (e) {
+    window.__lastDragPost = { msg: 'error', err: String(e && e.message), at: Date.now() };
+  }
+}
+
+document.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  dragActive = true;
+  dragMoved = false;
+  dragOrigin = { x: e.screenX, y: e.screenY };
+  document.body.classList.add('dragging');
+  postDrag('start', e.screenX, e.screenY, false);
+  /* 被"抓起"的姿势：主题配了 drag 池就播，没配就保持原样（降级由 resolveClip 负责）。 */
+  if (theme.clips && theme.clips.drag && theme.clips.drag.length) {
+    play(pick(theme.clips.drag), { loop: true });
+  }
+  e.preventDefault();
+});
+
+document.addEventListener('mousemove', (e) => {
+  if (!dragActive) return;
+  const dx = e.screenX - dragOrigin.x;
+  const dy = e.screenY - dragOrigin.y;
+  if (!dragMoved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) dragMoved = true;
+  postDrag('move', e.screenX, e.screenY, dragMoved);
+});
+
+document.addEventListener('mouseup', (e) => {
+  if (!dragActive) return;
+  dragActive = false;
+  document.body.classList.remove('dragging');
+  postDrag('end', e.screenX, e.screenY, dragMoved);
+  if (dragMoved) {
+    /* 拖动结束后回到当前状态的循环动画（拖动姿势是一次性的）。 */
+    setState(currentState || 'idle', { force: true });
+  }
+});
+
+/* A drag that leaves the window would otherwise keep the "grabbing" pose forever. */
+window.addEventListener('mouseleave', () => {
+  if (!dragActive) return;
+  dragActive = false;
+  document.body.classList.remove('dragging');
+  postDrag('end', 0, 0, dragMoved);
+});
+
+/* ---- right-click menu: the only way to dismiss the pet without a taskbar ----
+   The window has no frame and no taskbar button, so without this the owner has no
+   way to say "go away" except killing the process. Kept deliberately tiny: three
+   items, no nesting. */
+const menu = document.createElement('div');
+menu.id = 'petmenu';
+menu.innerHTML =
+  '<button data-act="panel">打开小窗</button>' +
+  '<button data-act="reset">回到右下角</button>' +
+  '<button data-act="close">让小肥鱼回去</button>';
+document.body.appendChild(menu);
+menu.style.display = 'none';
+
+function hideMenu() { menu.style.display = 'none'; }
+
+/* Diagnostics for the right-click investigation: report EVERY mouse-ish event that
+   reaches the page so a missing contextmenu can be told apart from a missing click.
+   Only enabled with ?debug=1 on the page URL -- otherwise it would grow the host log
+   on every single click. */
+if (/[?&]debug=1/.test(location.search)) {
+  ['pointerdown', 'mousedown', 'mouseup', 'auxclick', 'click'].forEach((t) => {
+    document.addEventListener(t, (e) => {
+      console.log('evt ' + t + ' button=' + e.button + ' buttons=' + e.buttons +
+        ' at ' + Math.round(e.clientX) + ',' + Math.round(e.clientY));
+    }, true);
+  });
+}
+
+/* Open the menu at a point. Used by contextmenu AND by the right-button auxclick
+   fallback: on this frameless always-on-top window the OS-level contextmenu is
+   normally delivered (verified 2026-11-06), but the fallback costs nothing and makes
+   the pet keep working if a future Windows / Electron combination drops it. */
+let menuOpenedAt = 0;
+function openMenu(clientX, clientY) {
+  console.log('menu open at ' + Math.round(clientX) + ',' + Math.round(clientY));
+  /* Diagnostics: if the menu never appears, check document.title — it records every
+     right-click the page actually saw, which separates "event never arrives" from
+     "menu renders off-screen". */
+  document.title = 'menu@' + Math.round(clientX) + ',' + Math.round(clientY);
+  /* 'flex', NOT 'block': #petmenu is a column flex container, and an inline
+     display:block here silently turned the two items into one horizontal row
+     (measured in the 2026-11-06 selftest screenshot). */
+  menu.style.display = 'flex';
+  /* Keep the menu inside the window: it is only 240px square. */
+  const pad = 6;
+  const mw = menu.offsetWidth || 130;
+  const mh = menu.offsetHeight || 70;
+  menu.style.left = Math.max(pad, Math.min(clientX, window.innerWidth - mw - pad)) + 'px';
+  menu.style.top = Math.max(pad, Math.min(clientY, window.innerHeight - mh - pad)) + 'px';
+  menuOpenedAt = Date.now();
+}
+
+document.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  openMenu(e.clientX, e.clientY);
+});
+
+/* Fallback: a right-button release always arrives even if contextmenu does not.
+   It is deferred one tick so that a contextmenu arriving right after it (the order
+   observed on Windows is mouseup -> auxclick -> contextmenu) wins and we do not
+   open the menu twice. */
+document.addEventListener('auxclick', (e) => {
+  if (e.button !== 2) return;
+  e.preventDefault();
+  setTimeout(() => {
+    if (Date.now() - menuOpenedAt < 400) return;   // contextmenu already handled it
+    openMenu(e.clientX, e.clientY);
+  }, 80);
+});
+
+/* ---- 打开小窗（副屏面板）----
+   主人会只留桌宠、把小窗关掉，所以桌宠菜单要能把小窗叫回来。
+   面板状态归服务端管，页面只问一句再决定"开"还是"已经开着"——toggle 接口是
+   幂等不了的（开着再点就关），所以先读 panel.json 再动手，避免误关。 */
+async function openPanel() {
+  if (!API_BASE) { bubble('没有小窗地址…'); return; }
+  try {
+    const r = await fetch(API_BASE + '/dsh-dual-screen/panel.json', { cache: 'no-store' });
+    const j = r.ok ? await r.json() : {};
+    const st = (j && j.panel && j.panel.status) || '';
+    if (st === 'open' || st === 'opening') { bubble('小窗已经开着啦'); return; }
+    const p = await fetch(API_BASE + '/dsh-dual-screen/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'open' }),
+    });
+    const out = await p.json().catch(() => ({}));
+    if (out && out.open) bubble('小窗来啦');
+    else if (out && out.error) bubble('小窗打不开：' + String(out.error).slice(0, 40));
+    else bubble('小窗没打开…');
+  } catch (e) {
+    bubble('小窗没打开…');
+  }
+}
+
+menu.addEventListener('click', (e) => {
+  const act = e.target && e.target.getAttribute && e.target.getAttribute('data-act');
+  if (!act) return;
+  hideMenu();
+  if (act === 'panel') { openPanel(); return; }   /* 页面自己走 HTTP，不经过 IPC */
+  if (window.petHost && typeof window.petHost.menu === 'function') {
+    window.petHost.menu(act);       // Electron: main process handles it
+  } else {
+    /* WebView2 host or plain browser: nothing to ask, so just report. */
+    console.log('[pet] menu action (no host):', act);
+  }
+});
+
+document.addEventListener('click', (e) => {
+  if (!menu.contains(e.target)) hideMenu();
+});
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideMenu(); });
+
+/* ---- click: 点一下 = 把小窗叫回来 ----
+   折叠圆气泡已经砍掉（2026-11-06 主人：又卡又难看），收起态就是这只桌宠。
+   所以点击的主语义是"展开小窗"，顺手播个反应动画；拖动结尾的 click 不算（dragMoved）。 */
+document.body.addEventListener('click', () => {
+  if (dragMoved) { dragMoved = false; return; }
+  react('click');
+  openPanel();
+});
+
+/* ---- idle entertainment ---- */
+function scheduleRandom() {
+  if (randomTimer) clearTimeout(randomTimer);
+  const t = (theme.timing || {});
+  const min = Number(t.randomMinMs) || 25000;
+  const max = Number(t.randomMaxMs) || 60000;
+  const wait = min + Math.random() * Math.max(1, max - min);
+  randomTimer = setTimeout(() => {
+    if (currentState === 'idle' && Date.now() - idleSince > 20000) {
+      const name = pick(theme.random);
+      if (name) play(name, { loop: false });
+    }
+    scheduleRandom();
+  }, wait);
+}
+
+/* ---- mood from the host: poll pet.json and follow it ---- */
+function startMoodPolling() {
+  if (!API_BASE) return;
+  const tick = async () => {
+    try {
+      const r = await fetch(API_BASE + '/dsh-dual-screen/pet.json', { cache: 'no-store' });
+      if (!r.ok) return;
+      const j = await r.json();
+      const mood = (j && j.pet && j.pet.mood) || 'idle';
+      if (mood !== currentState) setState(mood);
+    } catch { /* mood is a nicety; never break the pet over it */ }
+  };
+  moodTimer = setInterval(tick, 3000);
+  tick();
+}
+
+/* ---- boot: load the theme manifest, then start ---- */
+async function boot() {
+  const themeRel = THEME_ID;                       // relative to panel/pets/
+  theme = { id: THEME_ID, clips: {}, random: [], timing: {}, clipDir: themeRel + '/webm' };
+
+  try {
+    const r = await fetch(assetUrl(themeRel + '/theme.json'), { cache: 'no-store' });
+    if (r.ok) {
+      const m = await r.json();
+      theme = Object.assign(theme, m);
+      // A theme may relocate its clips; default is <theme>/webm.
+      theme.clipDir = themeRel + '/' + (m.clipDir || 'webm');
+      theme.posterUrl = assetUrl(themeRel + '/' + (m.poster || 'poster.png'));
+    }
+  } catch { /* fall through to defaults: idle pool is empty -> poster */ }
+
+  const t = theme.timing || {};
+  document.documentElement.style.setProperty('--fade', (Number(t.fadeMs) || 220) + 'ms');
+  document.documentElement.style.setProperty('--bob', (Number(t.bobPeriodMs) || 4200) + 'ms');
+
+  const sprite = theme.sprite || {};
+  if (sprite.scale) stage.style.transform = 'scale(' + Number(sprite.scale) + ')';
+
+  window.__petTheme = { id: theme.id, name: theme.name, clips: Object.keys(theme.clips || {}) };
+  document.title = theme.name || THEME_ID;
+
+  setState('idle', { force: true });
+  scheduleRandom();
+  startMoodPolling();
+}
+
+/* ---- host API ---- */
+window.__pet = {
+  setState, react, bubble,
+  openPanel,                       /* 菜单「打开小窗」同一条路，便于自测/排查 */
+  clip(name, loop) { play(name, { loop: !!loop }); },
+  theme() { return window.__petTheme || null; },
+  /* Diagnostics: what the page sees of the host bridge. Dragging depends on this,
+     so it is worth being able to ask instead of guessing. */
+  bridge() {
+    const wv = window.chrome && window.chrome.webview;
+    return {
+      chrome: !!window.chrome,
+      webview: !!wv,
+      postMessage: !!(wv && wv.postMessage),
+      dragging: dragActive,
+      lastPost: window.__lastDragPost || null,
+      theme: (window.__petTheme || {}).id || null,
+    };
+  },
+  info() { return { state: currentState, clip: currentClip, theme: THEME_ID, ready: true }; }
+};
+
+/* Record the last message we tried to post: if the host never sees drags, this tells
+   us whether the page even attempted one. */
+const _origPostDrag = postDrag;
+
+boot();
+</script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>副屏管家</title>
+<link rel="stylesheet" href="./panel.css">
+</head>
+<body>
+<div id="app" class="app expanded">
+  <!-- 折叠态：56px 鲸鱼头像气泡（形态 C，PLAN §7.7.1） -->
+  <button id="bubble" class="bubble" title="展开副屏管家">
+    <img src="./avatar.png" alt="小鲸鱼">
+    <span id="badge" class="badge hidden">0</span>
+  </button>
+
+  <!-- 展开态 -->
+  <section id="panel" class="panel">
+    <header class="head">
+      <img class="avatar" src="./avatar.png" alt="">
+      <div class="titles">
+        <div class="title">副屏管家</div>
+        <div class="sub" id="subtitle">正在连接…</div>
+      </div>
+      <div class="dot" id="dot" title="与 DSH 的连接状态"></div>
+      <button class="icon" id="btn-collapse" title="折叠成头像气泡">▾</button>
+      <button class="icon" id="btn-close" title="关闭面板（投送继续）">✕</button>
+    </header>
+
+    <div class="status" id="status">主屏 · · ·</div>
+
+    <section class="asks" id="asks">
+      <div class="empty">
+        <div class="whale">🐋</div>
+        <div class="empty-text">主屏安静，这里待命</div>
+      </div>
+    </section>
+
+    <section class="timeline">
+      <div class="tl-head">最近事件</div>
+      <ul id="timeline" class="tl-list">
+        <li class="tl-empty">还没有事件</li>
+      </ul>
+    </section>
+
+    <footer class="bar">
+      <button class="chip" data-action="continue">继续</button>
+      <button class="chip" data-action="stop">停止</button>
+      <button class="chip" data-action="settings">设置</button>
+    </footer>
+  </section>
+</div>
+<script src="./panel.js"></script>
+</body>
+</html>

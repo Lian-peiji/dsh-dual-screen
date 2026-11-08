@@ -1,0 +1,58 @@
+{
+  "name": "dsh-dual-screen",
+  "version": "0.3.0",
+  "description": "副屏管家「小肥鱼」：把工具打开的浏览器/终端窗口投送到副屏；副屏常驻面板承载事件时间线与问答（谁先答算谁）；透明桌宠；并能在副屏直接启动进程（run_on_secondary 工具）。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "client",
+    "panel",
+    "pet-electron",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node probe/p1-plugin-load.mjs && node probe/test-p3-events.mjs && node probe/test-p3-mood.mjs && node probe/test-p4-race.mjs",
+    "check:ps1": "powershell -NoProfile -ExecutionPolicy Bypass -File probe/check-ps1.ps1 -Path bin/run-on-secondary.ps1"
+  },
+  "license": "MIT",
+  "author": "大肥鱼",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dual-screen",
+    "multi-monitor",
+    "window-mover",
+    "desktop-pet"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+    "ts":  "2026-11-05T22:20:51",
+    "dpiAwareBefore":  0,
+    "dpiAwareAfter":  2,
+    "setDpiOk":  true,
+    "monitorCount":  2,
+    "monitors":  [
+                     {
+                         "index":  1,
+                         "hmon":  "0x1007F",
+                         "device":  "\\\\.\\DISPLAY2",
+                         "primary":  true,
+                         "x":  0,
+                         "y":  0,
+                         "w":  2560,
+                         "h":  1440,
+                         "workX":  0,
+                         "workY":  0,
+                         "workW":  2560,
+                         "workH":  1392,
+                         "dpiX":  96,
+                         "dpiY":  96,
+                         "dpiHr":  0,
+                         "scalePct":  100
+                     },
+                     {
+                         "index":  2,
+                         "hmon":  "0x20001",
+                         "device":  "\\\\.\\DISPLAY1",
+                         "primary":  false,
+                         "x":  2560,
+                         "y":  -588,
+                         "w":  1600,
+                         "h":  2560,
+                         "workX":  2560,
+                         "workY":  -588,
+                         "workW":  1600,
+                         "workH":  2488,
+                         "dpiX":  144,
+                         "dpiY":  144,
+                         "dpiHr":  0,
+                         "scalePct":  150
+                     }
+                 ],
+    "systemMetrics":  {
+                          "SM_CMONITORS":  2,
+                          "SM_CXSCREEN":  2560,
+                          "SM_CYSCREEN":  1440,
+                          "SM_XVIRTUAL":  0,
+                          "SM_YVIRTUAL":  -588,
+                          "SM_CXVIRTUAL":  4160,
+                          "SM_CYVIRTUAL":  2560
+                      }
+}

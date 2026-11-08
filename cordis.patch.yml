@@ -1,0 +1,6 @@
+# dsh-dual-screen bundle patch
+# 单包单插件：装上即生效，无额外子插件。
+# P0 骨架：只注册 webServer 路由（健康检查/屏幕枚举/配置）。
+- insert:
+    - id: dsh-dual-screen
+      name: dsh-dual-screen

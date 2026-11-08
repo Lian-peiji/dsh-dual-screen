@@ -1,0 +1,7 @@
+{
+  "name": "dsh-dual-screen-pet",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Transparent pet window for dsh-dual-screen (Electron host: transparent AND clickable, which WPF cannot do)",
+  "main": "main.js"
+}

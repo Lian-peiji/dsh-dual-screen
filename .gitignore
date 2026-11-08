@@ -1,0 +1,19 @@
+node_modules/
+dist/
+*.tgz
+*.bak
+*.bak-*
+*.backup-*
+_tmp/
+_scratch/
+.DS_Store
+Thumbs.db
+
+# 内部施工笔记（含本机绝对路径与私人记录，不随公开仓库发布）
+PLAN.md
+PLAN.md.bak-v0.5
+HANDOFF.md
+POSTMORTEM-*.md
+NEXT-SESSION-PROMPT.md
+START-PROMPT.md
+mockups/
