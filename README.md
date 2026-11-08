@@ -12,6 +12,7 @@
 |---|---|
 | **窗口投送** | 本鲸调工具打开的浏览器 / 终端窗口，自动搬到副屏；`CreateProcess` + cloak 隐藏那一帧，搬完再显示，主屏不闪 |
 | **副屏面板** | 副屏常驻一块面板（进程内 WPF），显示事件时间线、问答卡片、状态 chip；可拖边改尺寸。**收起态 = 桌宠**（2026-11-06 起不再有折叠圆气泡） |
+| **一键收成桌宠** | 点面板右上 `▾`，面板收起、桌宠**就在鼠标底下**出现（<10 ms，不是每次重新拉 Electron：面板开着时桌宠已在后台热备，见下） |
 | **副屏问答** | DSH 提问时主窗口照常弹 + 副屏镜像一份，**谁先答算谁**（`ask.mode='race'`），也可以配成只在副屏问 |
 | **透明桌宠** | 副屏上一只透明、可点、可拖的鲸鱼娘（Electron 宿主，主题可插拔：`panel/pets/<id>/`） |
 | **`run_on_secondary` 工具** | 让模型在副屏启动一个进程：窗口从第一帧就生在副屏，不闪主屏、不抢键盘焦点 |
@@ -99,14 +100,33 @@ run_on_secondary(command="cmd.exe", args="/k npm run dev", mode="show")
 
 ---
 
-## 排障
+## 收起即桌宠：为什么这么快
 
+点面板上的 `▾`，桌宠在光标位置出现，实测 **3 ms**（`panel/form` 的 `ms` 字段可以复现）。
+
+做法不是"点一下再启动 Electron"，而是**热备**：面板打开后 1.2 秒，插件就在后台拉起一只
+`visible:false` 的桌宠，页面、主题 webm 全部加载完，只剩 `show` 没做。点最小化时后端只做两件事：
+
+1. 把面板宿主的进程关掉；
+2. 通过 Windows 命名管道发 `{"cmd":"show","x":..,"y":..}`。
+
+为什么是命名管道而不是 stdin：`electron.exe` 是 GUI 子系统程序，Windows 下主进程拿不到可用的
+stdin 句柄，`stdio:'pipe'` 会静默降级（实测第一秒就 `stdin.destroyed=true`）。管道名带宿主 pid
+（`\\.\pipe\dsh-dual-screen-pet-<pid>`），旧进程不会串到新宿主上。
+
+落点规则：**以光标为中心**，再整体夹回副屏可用区，所以贴边时桌宠不会被切掉一半。
+服务端拿不到光标（HTTP 直调、自检）才回到副屏右上角。
+
+---
+
+## 排障
 | 现象 | 检查 |
 |---|---|
 | 面板不出现 | `curl http://127.0.0.1:<端口>/dsh-dual-screen/health.json` 看 `active` / `hasSecondary`；单屏时 `active=false` 是正常的 |
 | 窗口没被搬 | `health.json` 的 `monitors` 是否 2；`moveWindows.enabled`；窗口是不是手动拖回主屏过（`respectManualDrag`） |
 | 工具没出现 | `health.json` → `tool.registered` / `tool.error` |
 | 桌宠不动 | 跑 `probe/pet-motion-check.ps1`（两帧像素比对，截图好看不代表在播） |
+| 收起很慢 | `health.json`/`pet.json` 看桌上是否已有热备（`warm:true`）；`panel/form` 返回的 `warm` 应为 `true`，`ms` 应在个位数 |
 | 改完没生效 | 三处目录是不是同步了；热重载开关是否真的切过（`enabled=false` 再 `true`） |
 
 日志：`E:\dsh\dual-screen\logs\`、`panel-host.log`、`pet-host.log`。
@@ -120,6 +140,8 @@ node probe/p1-plugin-load.mjs    # 离线加载插件（mock ctx）：apply 抛�
 node probe/test-p3-events.mjs    # 事件流
 node probe/test-p3-mood.mjs      # 状态映射
 node probe/test-p4-race.mjs      # 问答竞速
+node probe/test-warm-spot.mjs    # 收起桌宠的落点几何（光标居中 + 贴边夹紧）
+node probe/warm-pipe-test.cjs    # 真机：命名管道预热 / show / quit
 powershell -File probe/check-ps1.ps1 -Path bin/run-on-secondary.ps1   # .ps1 必须纯 ASCII
 ```
 

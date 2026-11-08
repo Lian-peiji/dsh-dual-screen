@@ -89,6 +89,10 @@ public static class PNative {
   [DllImport("user32.dll")] public static extern IntPtr SetCapture(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ReleaseCapture();
   [DllImport("user32.dll")] public static extern short GetKeyState(int key);
+  // Owner request 2026-11-08: the pet must pop up UNDER THE CURSOR when the panel is
+  // folded away, so the fold button reports the live pointer position instead of
+  // letting the server guess a corner.
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
   // Form C: clip the whole window to a circle. SetWindowRgn is the only way to get
   // rounded corners WITHOUT AllowsTransparency, which would make the window
   // click-through (the exact WPF trap this project already lost a day to).
@@ -774,7 +778,16 @@ function Send-PanelForm([string]$form) {
     # 'collapsed' == "hand over to the pet": the server closes this host, so applying
     # the old bubble geometry locally would only produce a visible, janky flash.
     if ($form -ne 'collapsed') { Apply-Form $form }
-    $body = '{"form":"' + $form + '"}'
+    # Report the pointer position so the pet can pop up exactly under the cursor
+    # (owner 2026-11-08). Physical pixels, same space as our window rects.
+    $extra = ''
+    if ($form -eq 'collapsed') {
+      $cur = New-Object PNative+POINT
+      if ([PNative]::GetCursorPos([ref]$cur)) {
+        $extra = ',"cursor":[' + $cur.x + ',' + $cur.y + ']'
+      }
+    }
+    $body = '{"form":"' + $form + '"' + $extra + '}'
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $req = [System.Net.HttpWebRequest]::Create($script:askBase + '/dsh-dual-screen/panel/form')
     $req.Method = 'POST'

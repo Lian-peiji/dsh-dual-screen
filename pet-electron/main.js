@@ -51,6 +51,14 @@ const POS_FILE = arg('pos-file', '')
 const LOG_FILE = arg('log', '')
 const SIZE = Number(arg('size', '240')) || 240
 const EXIT_AFTER = Number(arg('exit-after', '0')) || 0
+// Warm start: boot the window but keep it hidden. The plugin preloads one of these
+// while the panel is on screen, so "fold the panel into the pet" becomes a show()
+// instead of paying Electron's ~900 ms cold boot every single time.
+const START_HIDDEN = arg('start-hidden', '') === '1'
+// Named-pipe address for the warm-standby control channel (see below). Shape:
+// \\.\pipe\dsh-dual-screen-pet-<pid of the plugin>  -- unique per host process, so a
+// stale pet from a previous run can never be mistaken for the live one.
+const PET_PIPE = arg('pipe', '')
 // Dev-only acceptance hook. OS-level input injection turned out to be unreliable in
 // this host (SetCursorPos returns False; relative moves stop short), so the pet can
 // verify its own right-click path through Blink instead: Chromium's own input
@@ -185,6 +193,20 @@ function runSelfTest() {
   })
 }
 
+function writeReady() {
+  try {
+    fs.writeFileSync(READY_FILE, JSON.stringify({
+      pet: 'ready',
+      pid: process.pid,
+      hwnd: '0x' + win.getNativeWindowHandle().readBigUInt64LE(0).toString(16),
+      rect: [win.getBounds().x, win.getBounds().y, SIZE, SIZE],
+      visible: win.isVisible(),
+      engine: 'electron',
+      electron: process.versions.electron,
+    }), 'utf8')
+  } catch (e) { log('ready write failed: ' + e.message) }
+}
+
 app.on('ready', () => {
   log('app ready')
   try {
@@ -227,7 +249,12 @@ app.on('ready', () => {
     if (win.setVisibleOnAllWorkspaces) win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
 
     win.once('ready-to-show', () => {
-      win.show()
+      // Warm start keeps the window off-screen visually but fully built: the renderer
+      // has loaded the page, decoded the webm theme and solved layout. A later
+      // 'show' command from the plugin is then just setBounds + show, i.e. the
+      // pet appears in the same frame as the panel disappearing (owner's 2026-11-08
+      // complaint: folding into the pet took far too long).
+      if (!START_HIDDEN) win.show()
       // Accept the mouse. On Windows a transparent BrowserWindow is click-through by
       // default; without this call WindowFromPoint never reports the pet and no drag,
       // click or hover can ever reach the page.
@@ -267,16 +294,7 @@ app.on('ready', () => {
           })
       } catch (e) { log('native assert threw: ' + e.message) }
       log('shown')
-      try {
-        fs.writeFileSync(READY_FILE, JSON.stringify({
-          pet: 'ready',
-          pid: process.pid,
-          hwnd: '0x' + win.getNativeWindowHandle().readBigUInt64LE(0).toString(16),
-          rect: [win.getBounds().x, win.getBounds().y, SIZE, SIZE],
-          engine: 'electron',
-          electron: process.versions.electron,
-        }), 'utf8')
-      } catch (e) { log('ready write failed: ' + e.message) }
+      writeReady()
     })
 
     // Persist position when a drag finishes (throttled: move fires continuously).
@@ -296,6 +314,69 @@ app.on('ready', () => {
       if (msg) log('page: ' + String(msg).slice(0, 400))
     })
     win.webContents.on('render-process-gone', (e, d) => log('renderer gone: ' + JSON.stringify(d)))
+
+  // ---- warm-standby control channel ----
+  // The plugin keeps one hidden pet alive and steers it over a Windows named pipe,
+  // one JSON per line:
+  //   {"cmd":"show","x":123,"y":456}   place at physical px and reveal (same frame)
+  //   {"cmd":"hide"}                   duck back to standby without quitting
+  //   {"cmd":"pos","x":..,"y":..}      move while already visible
+  //   {"cmd":"quit"}                   real exit (plugin shutdown / owner sent it home)
+  //
+  // NOT stdin: electron.exe is a GUI-subsystem binary, so on Windows the main process
+  // has no usable stdin handle -- the pipe we were handed reads EOF immediately and
+  // stdio 'pipe' silently degrades (measured 2026-11-08: process alive, stdin already
+  // destroyed before the first write). A named pipe is always available.
+  if (START_HIDDEN && PET_PIPE) {
+    const net = require('net')
+    const server = net.createServer((sock) => {
+      log('pipe: plugin connected')
+      let buf = ''
+      sock.setEncoding('utf8')
+      sock.on('data', (chunk) => {
+        buf += chunk
+        let nl
+        while ((nl = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          let msg = null
+          try { msg = JSON.parse(line) } catch { log('pipe: bad json ' + line.slice(0, 120)); continue }
+          try { handleCommand(msg) } catch (e) { log('pipe cmd failed: ' + e.message) }
+        }
+      })
+      sock.on('error', (e) => log('pipe socket error: ' + e.message))
+      // The plugin dying must not leave a pet stranded on screen forever.
+      sock.on('close', () => { log('pipe: plugin gone -> quitting'); app.quit() })
+    })
+    server.on('error', (e) => log('pipe server error: ' + e.message))
+    server.listen(PET_PIPE, () => log('warm standby: pipe listening ' + PET_PIPE))
+  }
+
+  function handleCommand(msg) {
+    const cmd = String((msg && msg.cmd) || '')
+    log('cmd: ' + cmd + ' ' + JSON.stringify(msg))
+    if (cmd === 'quit') { app.quit(); return }
+    if (!win || win.isDestroyed()) return
+    if (cmd === 'hide') { win.hide(); return }
+    const hasX = Number.isFinite(Number(msg.x))
+    const hasY = Number.isFinite(Number(msg.y))
+    if (cmd === 'pos' || cmd === 'show') {
+      if (hasX && hasY) {
+        win.setBounds({ x: Math.round(Number(msg.x)), y: Math.round(Number(msg.y)), width: SIZE, height: SIZE })
+      }
+      if (cmd === 'show') {
+        // showInactive: reveal WITHOUT stealing keyboard focus from whatever the owner
+        // is typing in. show() would activate the pet and yank focus off the main window.
+        if (win.isVisible()) win.setAlwaysOnTop(true, 'screen-saver')
+        else win.showInactive()
+        win.setAlwaysOnTop(true, 'screen-saver')
+        try { win.setIgnoreMouseEvents(false) } catch { /* keep going */ }
+        log('shown at ' + win.getBounds().x + ',' + win.getBounds().y)
+        writeReady()
+      }
+    }
+  }
 
   // ---- drag driven by the renderer ----
   // The page posts {type:'pet-drag', phase, dx, dy}; we move the window by the delta
